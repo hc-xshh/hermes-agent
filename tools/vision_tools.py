@@ -287,17 +287,20 @@ _MAX_BASE64_BYTES = 20 * 1024 * 1024
 # rejects an image, we downscale to this target and retry once.
 _RESIZE_TARGET_BYTES = 5 * 1024 * 1024
 
-# Hard per-axis pixel cap.  Anthropic's Messages API rejects any image whose
-# width or height exceeds 8000 px with a non_retryable_client_error 400:
-#   messages.N.content.M.image.source.base64.data:
-#     At least one of the image dimensions exceed max allowed size: 8000 pixels
-# Without this guard, an oversized screenshot inlined via the native fast path
-# permanently bricks the session — every subsequent request replays the bad
-# image and gets the same 400.  We clamp to 7999 (one px under the cap) so the
-# resulting image is always accepted.  Other major providers (OpenAI, Gemini)
-# auto-downscale server-side and don't share this failure mode, but the cap
-# is conservative enough that applying it everywhere is harmless.
+# Anthropic Messages API rejects any image with width or height >8000 px with
+# a non_retryable_client_error 400, which poisons message history on the native
+# fast path. We clamp to 7999 only when sending to Anthropic; other providers
+# (OpenAI, Gemini, custom hosts) auto-downscale or handle their own limits.
 _MAX_IMAGE_DIMENSION = 7999
+
+
+def _is_anthropic_provider() -> bool:
+    """Return True if the active main provider is Anthropic."""
+    try:
+        from agent.auxiliary_client import _read_main_provider
+        return (_read_main_provider() or "").strip().lower() == "anthropic"
+    except Exception:
+        return False
 
 
 def _get_image_dimensions(image_path: Path) -> Optional[tuple]:
@@ -343,7 +346,8 @@ def _is_image_size_error(error: Exception) -> bool:
 
 
 def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
-                              max_base64_bytes: int = _RESIZE_TARGET_BYTES) -> str:
+                              max_base64_bytes: int = _RESIZE_TARGET_BYTES,
+                              clamp_dimensions: bool = False) -> str:
     """Convert an image to a base64 data URL, auto-resizing if too large.
 
     Tries Pillow first to progressively downscale oversized images.  If Pillow
@@ -353,13 +357,10 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     Returns the base64 data URL string.
     """
     # Quick file-size estimate: base64 expands by ~4/3, plus data URL header.
-    # Skip the expensive full-read + encode if Pillow can resize directly.
-    # We also bypass this fast-exit when dimensions exceed the per-axis cap —
-    # a small-byte image can still be 10000 px wide (e.g. a long thin
-    # screenshot) and Anthropic rejects on dimensions independently of bytes.
+    # Skip the fast-exit when caller wants dimension clamping (Anthropic).
     file_size = image_path.stat().st_size
     estimated_b64 = (file_size * 4) // 3 + 100  # ~header overhead
-    needs_dim_clamp = _image_exceeds_pixel_cap(image_path)
+    needs_dim_clamp = clamp_dimensions and _image_exceeds_pixel_cap(image_path)
     if estimated_b64 <= max_base64_bytes and not needs_dim_clamp:
         # Small enough — just encode directly.
         data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
@@ -398,10 +399,9 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     if pil_format == "JPEG" and img.mode in {"RGBA", "P"}:
         img = img.convert("RGB")
 
-    # Dimension clamp: if either axis exceeds the per-axis pixel cap, shrink
-    # proportionally to fit before any byte-size work.  Anthropic rejects
-    # >8000 px outright regardless of byte size, so this must happen first.
-    if img.width > _MAX_IMAGE_DIMENSION or img.height > _MAX_IMAGE_DIMENSION:
+    # Dimension clamp (Anthropic only): proportionally shrink to fit the cap
+    # before any byte-size work, since Anthropic rejects on dimensions alone.
+    if clamp_dimensions and (img.width > _MAX_IMAGE_DIMENSION or img.height > _MAX_IMAGE_DIMENSION):
         scale = _MAX_IMAGE_DIMENSION / max(img.width, img.height)
         new_w = max(int(img.width * scale), 1)
         new_h = max(int(img.height * scale), 1)
@@ -655,15 +655,13 @@ async def _vision_analyze_native(
             temp_image_path, mime_type=detected_mime_type,
         )
 
-        # Honour the same hard cap as the legacy path. Resize if needed.
-        # We resize on EITHER byte overflow OR pixel-dimension overflow —
-        # Anthropic rejects images >8000 px on a side regardless of byte size,
-        # and the failure is non_retryable_client_error which permanently
-        # poisons the message history.
+        # Honour the byte cap; also apply the pixel cap for Anthropic only.
+        is_anthropic = _is_anthropic_provider()
         if (len(image_data_url) > _MAX_BASE64_BYTES
-                or _image_exceeds_pixel_cap(temp_image_path)):
+                or (is_anthropic and _image_exceeds_pixel_cap(temp_image_path))):
             image_data_url = _resize_image_for_vision(
                 temp_image_path, mime_type=detected_mime_type,
+                clamp_dimensions=is_anthropic,
             )
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 return tool_error(
@@ -804,14 +802,13 @@ async def vision_analyze_tool(
         data_size_kb = len(image_data_url) / 1024
         logger.info("Image converted to base64 (%.1f KB)", data_size_kb)
 
-        # Hard limit (20 MB) — no provider accepts payloads this large.
-        # Anthropic also enforces a per-axis pixel cap (8000 px), so resize on
-        # dimension overflow even when the byte size is fine.
+        # Hard 20 MB byte cap; pixel cap applies to Anthropic only.
+        is_anthropic = _is_anthropic_provider()
         if (len(image_data_url) > _MAX_BASE64_BYTES
-                or _image_exceeds_pixel_cap(temp_image_path)):
-            # Try to resize down to 5 MB / within the pixel cap before giving up.
+                or (is_anthropic and _image_exceeds_pixel_cap(temp_image_path))):
             image_data_url = _resize_image_for_vision(
-                temp_image_path, mime_type=detected_mime_type)
+                temp_image_path, mime_type=detected_mime_type,
+                clamp_dimensions=is_anthropic)
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 raise ValueError(
                     f"Image too large for vision API: base64 payload is "
@@ -887,7 +884,8 @@ async def vision_analyze_tool(
                     _RESIZE_TARGET_BYTES / (1024 * 1024),
                 )
                 image_data_url = _resize_image_for_vision(
-                    temp_image_path, mime_type=detected_mime_type)
+                    temp_image_path, mime_type=detected_mime_type,
+                    clamp_dimensions=_is_anthropic_provider())
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
                 response = await async_call_llm(**call_kwargs)
             else:

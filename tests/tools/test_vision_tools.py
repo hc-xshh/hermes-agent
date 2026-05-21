@@ -974,7 +974,7 @@ class TestPixelDimensionCap:
         path = tmp_path / "wide.png"
         img.save(path, "PNG")
 
-        result = _resize_image_for_vision(path, mime_type="image/png")
+        result = _resize_image_for_vision(path, mime_type="image/png", clamp_dimensions=True)
         assert result.startswith("data:image/png;base64,")
 
         # Decode the returned data URL and assert dimensions
@@ -1004,7 +1004,7 @@ class TestPixelDimensionCap:
         path = tmp_path / "tall.png"
         img.save(path, "PNG")
 
-        result = _resize_image_for_vision(path, mime_type="image/png")
+        result = _resize_image_for_vision(path, mime_type="image/png", clamp_dimensions=True)
         import base64
         from io import BytesIO
         _, b64data = result.split(",", 1)
@@ -1025,12 +1025,29 @@ class TestPixelDimensionCap:
         img = Image.new("RGB", (4000, 3000), (0, 128, 255))
         path = tmp_path / "ok.png"
         img.save(path, "PNG")
-        result = _resize_image_for_vision(path, mime_type="image/png")
+        result = _resize_image_for_vision(path, mime_type="image/png", clamp_dimensions=True)
         import base64
         from io import BytesIO
         _, b64data = result.split(",", 1)
         decoded = Image.open(BytesIO(base64.b64decode(b64data)))
         assert decoded.size == (4000, 3000)
+
+    def test_clamp_disabled_by_default_preserves_oversized(self, tmp_path):
+        """Non-Anthropic providers (clamp_dimensions=False) keep original dims."""
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        img = Image.new("RGB", (10000, 100), (50, 100, 150))
+        path = tmp_path / "wide.png"
+        img.save(path, "PNG")
+        # Default: clamp_dimensions=False — small enough in bytes, so fast-exit.
+        result = _resize_image_for_vision(path, mime_type="image/png")
+        import base64
+        from io import BytesIO
+        _, b64data = result.split(",", 1)
+        decoded = Image.open(BytesIO(base64.b64decode(b64data)))
+        assert decoded.size == (10000, 100)
 
 
 # ---------------------------------------------------------------------------
