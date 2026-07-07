@@ -32,6 +32,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
+    CRON_RESTRAINT_GUIDANCE,
     DEFAULT_AGENT_IDENTITY,
     EXECUTION_GUIDANCE_MODELS,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
@@ -40,6 +41,7 @@ from agent.prompt_builder import (
     MEMORY_GUIDANCE,
     USER_PROFILE_GUIDANCE,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
+    OUTCOME_REPORTING_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
     SESSION_SEARCH_GUIDANCE,
@@ -403,6 +405,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if getattr(agent, "_task_completion_guidance", True) and agent.valid_tool_names:
         stable_parts.append(TASK_COMPLETION_GUIDANCE)
 
+    # Universal outcome-reporting guidance.  Applied to ALL models —
+    # the failure mode (glossing over failures, hedging on completion)
+    # is not model-family specific.
+    if getattr(agent, "_outcome_reporting_guidance", True) and agent.valid_tool_names:
+        stable_parts.append(OUTCOME_REPORTING_GUIDANCE)
+
     # Universal parallel-tool-call guidance.  Tells the model to batch
     # independent tool calls into one assistant turn rather than emitting one
     # call per turn — the runtime already runs independent calls concurrently
@@ -435,6 +443,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
     if "skill_manage" in agent.valid_tool_names:
         tool_guidance.append(SKILLS_GUIDANCE)
+    if "cronjob" in agent.valid_tool_names:
+        tool_guidance.append(CRON_RESTRAINT_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
