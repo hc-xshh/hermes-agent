@@ -176,7 +176,7 @@ MEMORY_GUIDANCE = (
     "'User prefers concise responses' ✓ — 'Always respond concisely' ✗. "
     "'Project uses pytest with xdist' ✓ — 'Run tests with pytest -n 4' ✗. "
     "Imperative phrasing gets re-read as a directive in later sessions and can "
-    "Procedures and "
+    "cause repeated work or override the user's current request. Procedures and "
     "workflows belong in skills, not memory.\n"
     "When two memories are related, link them with [[memory-slug]] in the body. "
     "A [[link]] that doesn't match an existing memory yet is fine — it marks "
