@@ -3606,6 +3606,18 @@ def save_job_output(job_id: str, output: str):
     # Bound per-job output growth so long-running deploys don't fill the disk (#52383).
     _prune_job_output(job_output_dir, _cron_output_keep())
 
+    # Hermes fork hook: 输出落盘后自动同步到飞书日报（detach，失败绝不影响任务本身）。
+    try:
+        import subprocess as _sp
+        _sp.Popen(
+            ["python3", "/home/haha/.hermes/scripts/cron-sync-lark.py", job_id],
+            start_new_session=True,
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+        )
+    except Exception:
+        pass
+
     return output_file
 
 
