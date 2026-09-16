@@ -146,3 +146,74 @@ class TestCheckSystemdTimingAlignment:
         # for whatever unit pytest IS in.  Both are valid; we just ensure
         # the function doesn't raise.
         assert result is None or isinstance(result, dict)
+
+
+# ---------------------------------------------------------------------------
+# systemd probe scope — a unit missing from a scope still answers rc=0 with
+# systemd's built-in DEFAULTS, which must never be read as that unit's value.
+# ---------------------------------------------------------------------------
+
+class _Completed:
+    def __init__(self, stdout: str, returncode: int = 0):
+        self.stdout, self.returncode = stdout, returncode
+
+
+# systemd's own default for a unit that does not exist in the queried scope
+NOT_FOUND_DEFAULT = "TimeoutStopUSec=1min 30s\nLoadState=not-found\n"
+LIVE_UNIT_3MIN30 = "TimeoutStopUSec=3min 30s\nLoadState=loaded\n"
+
+
+def _fake_cgroup(monkeypatch, text: str) -> None:
+    real_open = open
+
+    def _open(path, *args, **kwargs):
+        if str(path) == "/proc/self/cgroup":
+            import io
+            return io.StringIO(text)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _open)
+
+
+def _fake_systemctl(monkeypatch, *, user: str, system: str, rc: int = 0):
+    """Records the probe order; answers per scope."""
+    calls: list = []
+
+    def _run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        return _Completed(user if "--user" in cmd else system, rc)
+
+    monkeypatch.setattr(sf.subprocess, "run", _run)
+    return calls
+
+
+class TestSystemdProbeScope:
+
+    def test_live_scope_is_probed_first(self, monkeypatch):
+        system_calls = _fake_systemctl(monkeypatch, user=NOT_FOUND_DEFAULT, system=LIVE_UNIT_3MIN30)
+        assert sf._systemd_timeout_stop_us("hermes-gateway.service", prefer_user=False) == 210_000_000
+        assert "--user" not in system_calls[0]
+
+        user_calls = _fake_systemctl(monkeypatch, user=LIVE_UNIT_3MIN30, system=NOT_FOUND_DEFAULT)
+        assert sf._systemd_timeout_stop_us("hermes-gateway.service", prefer_user=True) == 210_000_000
+        assert "--user" in user_calls[0]
+
+    def test_alignment_ignores_not_found_default_from_the_other_scope(self, monkeypatch):
+        monkeypatch.setenv("INVOCATION_ID", "boot-1")
+        _fake_cgroup(monkeypatch, "0::/system.slice/hermes-gateway.service\n")
+        _fake_systemctl(monkeypatch, user=NOT_FOUND_DEFAULT, system=LIVE_UNIT_3MIN30)
+
+        result = sf.check_systemd_timing_alignment(180.0, 30.0)
+
+        assert result is not None
+        # Reads the live unit, not the user scope's 90s default
+        assert result["timeout_stop_sec"] == 210.0
+        assert result["mismatch"] is False  # 210 >= 180 + 30
+
+    def test_not_found_in_every_scope_is_undeterminable(self, monkeypatch):
+        _fake_systemctl(monkeypatch, user=NOT_FOUND_DEFAULT, system=NOT_FOUND_DEFAULT)
+        assert sf._systemd_timeout_stop_us("hermes-gateway.service", prefer_user=False) is None
+
+    def test_nonzero_returncode_is_skipped(self, monkeypatch):
+        _fake_systemctl(monkeypatch, user=NOT_FOUND_DEFAULT, system=LIVE_UNIT_3MIN30, rc=1)
+        assert sf._systemd_timeout_stop_us("hermes-gateway.service", prefer_user=False) is None
