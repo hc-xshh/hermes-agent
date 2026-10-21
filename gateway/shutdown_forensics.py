@@ -210,13 +210,20 @@ def check_systemd_timing_alignment(
         return None  # Not running under systemd (or at least not directly)
     # /proc/self/cgroup: "0::/user.slice/.../hermes-gateway.service"
     unit_name: Optional[str] = None
+    cgroup_text = ""
     with contextlib.suppress(OSError), open("/proc/self/cgroup", encoding="utf-8") as fh:
-        for line in fh:
-            parts = reversed(line.strip().split("/"))
-            unit_name = next((p for p in parts if p.endswith(".service")), None)
-            if unit_name:
-                break
-    if (timeout_us := _systemd_timeout_stop_us(unit_name) if unit_name else None) is None:
+        cgroup_text = fh.read()
+    for line in cgroup_text.splitlines():
+        parts = reversed(line.strip().split("/"))
+        unit_name = next((p for p in parts if p.endswith(".service")), None)
+        if unit_name:
+            break
+    # Ask the scope THIS process runs in first. The same unit name usually does not exist in the
+    # other scope, and systemd still answers such a query with rc=0 plus its built-in defaults
+    # (TimeoutStopUSec=1min 30s) — a system-scope gateway would otherwise read the user scope's
+    # default and report a phantom timeout mismatch (and vice versa).
+    prefer_user = "user@" in cgroup_text or "/user.slice/" in cgroup_text
+    if (timeout_us := _systemd_timeout_stop_us(unit_name, prefer_user) if unit_name else None) is None:
         return None
     timeout_stop_sec = timeout_us / 1_000_000.0
     expected = float(resolve_systemd_timeout_stop_sec(drain_timeout, cron_drain_timeout))
@@ -225,24 +232,37 @@ def check_systemd_timing_alignment(
             "mismatch": timeout_stop_sec < expected}
 
 
-def _systemd_timeout_stop_us(unit_name: str) -> Optional[int]:
-    """``TimeoutStopUSec`` of ``unit_name`` in microseconds; ``--user`` first (hermes' usual)."""
-    for flag in (["--user"], []):
+def _systemd_timeout_stop_us(unit_name: str, prefer_user: bool = True) -> Optional[int]:
+    """``TimeoutStopUSec`` of ``unit_name`` in microseconds, asking ``prefer_user``'s scope first.
+
+    A scope that has no such unit still answers ``rc=0`` with systemd's built-in DEFAULTS
+    (``TimeoutStopUSec=1min 30s``); such a ``not-found`` reply is skipped rather than trusted.
+    """
+    order = (["--user"], []) if prefer_user else ([], ["--user"])
+    for flag in order:
         try:
             result = subprocess.run(
-                ["systemctl", *flag, "show", unit_name, "--property=TimeoutStopUSec"],
+                ["systemctl", *flag, "show", unit_name,
+                 "--property=TimeoutStopUSec", "--property=LoadState"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0,
                 check=False,
             )
         except (subprocess.TimeoutExpired, OSError):
             continue
-        # Output: "TimeoutStopUSec=1min 30s" or "TimeoutStopUSec=90000000"
-        for line in result.stdout.splitlines() if result.returncode == 0 else ():
+        if result.returncode != 0:
+            continue
+        # Output: "TimeoutStopUSec=1min 30s" / "LoadState=loaded"
+        timeout_us, load_state = None, ""
+        for line in result.stdout.splitlines():
             if line.startswith("TimeoutStopUSec="):
                 value = line.split("=", 1)[1].strip()
                 timeout_us = int(value) if value.isdigit() else parse_systemd_duration_to_us(value)
-                if timeout_us is not None:
-                    return timeout_us
+            elif line.startswith("LoadState="):
+                load_state = line.split("=", 1)[1].strip()
+        if load_state == "not-found":
+            continue
+        if timeout_us is not None:
+            return timeout_us
     return None
 
 

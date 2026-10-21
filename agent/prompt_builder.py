@@ -226,7 +226,10 @@ def build_memory_guidance(
         "'Always respond concisely' ✗ (imperative phrasing gets re-read as "
         "a directive in later sessions and can override the user's current "
         "request). A fact stale within a week belongs in session history; "
-        "procedures and workflows belong in skills."
+        "procedures and workflows belong in skills. When two memories are "
+        "related, link them with [[memory-slug]] in the body — a [[link]] that "
+        "has no matching entry yet is fine; it marks something worth capturing "
+        "later, not an error."
     )
 
 
@@ -393,6 +396,53 @@ TASK_COMPLETION_GUIDANCE = (
     "(different package manager, different approach, ask the user). NEVER substitute plausible-looking fabricated "
     "output (made-up data, invented file contents, synthesised API responses) for results you couldn't actually "
     "produce. Reporting a blocker honestly is always better than inventing a result."
+)
+
+# Universal outcome-reporting guidance — applied to ALL models.
+#
+# Modeled on Claude Code's harness directive: "Report outcomes faithfully:
+# if tests fail, say so with the output; if a step was skipped, say that;
+# when something is done and verified, state it plainly without hedging."
+# Addresses a cross-model failure mode where agents gloss over failures
+# or soft-pedal results — the human debugging from the other side needs
+# ground truth, not a smoothed-over summary.
+#
+# Injected unconditionally — the guidance is model-agnostic and costs ≅100
+# tokens, paid once at install and amortised via prefix caching.
+# (Hermes fork: carried across upstream refactors — see the system-prompt
+# contribution notes in the fork's docs.)
+OUTCOME_REPORTING_GUIDANCE = (
+    "# Reporting outcomes\n"
+    "When reporting results to the user, be direct and faithful:\n"
+    "- If a test, build, or command **failed**, say exactly that — include "
+    "the error output. Do not soften it with 'there were some issues' or "
+    "'mostly worked'.\n"
+    "- If a step was **skipped** or blocked, say so and why. Do not silently "
+    "omit it.\n"
+    "- If a task is truly **done and verified**, state it plainly without "
+    "hedging ('seems to work', 'should be fine').\n"
+    "- Never claim a file was written, a command succeeded, or an API call "
+    "returned data unless you have verified it with a tool. A tool's exit "
+    "code or return value is your evidence — cite it."
+)
+
+# Cron restraint — only injected when the cronjob tool is loaded.
+#
+# A completed task routinely invites "want me to schedule this daily?" — a
+# standing obligation the user did not ask for and now has to cancel. The
+# restraint is: offer only when THIS turn's work product names a future
+# obligation you can quote (a ramp date, a written "remove after X"), never
+# a timeframe the agent invented. (Hermes fork.)
+CRON_RESTRAINT_GUIDANCE = (
+    "## Cron/schedule restraint\n"
+    "You have access to the cronjob tool for scheduling recurring tasks. "
+    "Default: do NOT offer to create a cron job. Most tasks just end — "
+    "a completed bug fix, a refactor, a one-off query. Only offer when "
+    "this turn's work left a concrete artifact with a future obligation "
+    "you can quote verbatim: a flag/gate with a stated ramp date, a TODO "
+    "with a written \"remove after X\" condition, or a recurring check the "
+    "user explicitly asked for. Never invent a timeframe. At most once "
+    "per session."
 )
 
 # Universal parallel-tool-call guidance (ALL models): the runtime already executes independent calls
